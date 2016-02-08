@@ -20,21 +20,23 @@ import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
-import android.os.AsyncTask;
 import android.os.Binder;
 import android.os.Environment;
 import android.os.IBinder;
-import android.os.SystemClock;
 import android.util.Log;
-import android.widget.Toast;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -48,16 +50,23 @@ public class BluetoothLeService extends Service {
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
-    private String mBluetoothDeviceAddress;
+
     private File fileToPlay;
+    private File fileToWrite;
 
+    // Member fields
+    //private final Handler mHandler;
+    private AcceptThread mAcceptThread;
+    private ConnectThread mConnectThread;
+    private ConnectedThread mConnectedThread;
+    private int mState;
 
-    private int mConnectionState = STATE_DISCONNECTED;
+    // Constants that indicate the current connection state
+    public static final int STATE_NONE = 0;       // we're doing nothing
+    public static final int STATE_LISTEN = 1;     // now listening for incoming connections
+    public static final int STATE_CONNECTING = 2; // now initiating an outgoing connection
+    public static final int STATE_CONNECTED = 3;  // now connected to a remote device
 
-    private BluetoothSocket mBTSocket;
-
-    private static final int STATE_DISCONNECTED = 0;
-    private static final int STATE_CONNECTED = 1;
 
     public class LocalBinder extends Binder {
         BluetoothLeService getService() {
@@ -103,154 +112,466 @@ public class BluetoothLeService extends Service {
             return false;
         }
 
+        mState = STATE_NONE;
+
         return true;
     }
 
     /**
-     * Connects to the GATT server hosted on the Bluetooth LE device.
+     * Set the current state of the connection
      *
-     * @param address The device address of the destination device.
-     *
-     * @return Return true if the connection is initiated successfully. The connection result
-     *         is reported asynchronously through the
-     *         {@code BluetoothGattCallback#onConnectionStateChange(android.bluetooth.BluetoothGatt, int, int)}
-     *         callback.
+     * @param state An integer defining the current connection state
      */
-    public boolean connect(final String address) {
-        if (mBluetoothAdapter == null || address == null) {
-            Log.w(TAG, "BluetoothAdapter not initialized or unspecified address.");
-            return false;
-        }
-
-        Log.d(TAG, "TLG --------- Trying to create a new connection -----------");
-
-
-        final BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
-        if (device == null) {
-            Log.w(TAG, "Device not found.  Unable to connect.");
-            return false;
-        }
-
-        final Class BTDClass;
-        final Method BTDClassMethod;
-
-        try {
-            BTDClass = Class.forName(device.getClass().getName());
-        } catch (ClassNotFoundException e) {
-            Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
-            return false;
-        }
-        try {
-            Class[] cArg = new Class[1];
-            cArg[0] = int.class;
-            BTDClassMethod = BTDClass.getDeclaredMethod("createL2capSocket", cArg);
-        } catch (NoSuchMethodException e) {
-            Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
-            return false;
-        }
-        BTDClassMethod.setAccessible(true);
-
-        try {
-            mBTSocket = (BluetoothSocket) BTDClassMethod.invoke(device, 0x20025);
-        } catch (IllegalAccessException e) {
-            Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
-            return false;
-        } catch (InvocationTargetException e) {
-            Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
-            return false;
-        }
-
-        new ConnectBluetooth().execute();
-
-        mBluetoothDeviceAddress = address;
-        mConnectionState = STATE_CONNECTED;
-
-        return true;
+    private synchronized void setState(int state) {
+        Log.d(TAG, "setState() " + mState + " -> " + state);
+        mState = state;
     }
 
-    private class ConnectBluetooth extends AsyncTask<Void, Void, Void> {
+    /**
+     * Return the current connection state.
+     */
+    public synchronized int getState() {
+        return mState;
+    }
 
-        private boolean mStatus = true;
+    /**
+     * Start the Bluetooth service. Specifically start AcceptThread to begin a
+     * session in listening (server) mode. Called by the Activity onResume()
+     */
+    public synchronized void start() {
+        Log.d(TAG, "start");
 
-        @Override
-        protected Void doInBackground(Void... params) {
-            try {
-                mBTSocket.connect();
-            } catch (IOException e) {
-                Log.e(TAG, "ERROR connecting the BluetoothSocket");
-            }
-            Log.d(TAG, "TLG --------- connection successfully created -----------");
-            return null;
+        // Cancel any thread attempting to make a connection
+        if (mConnectThread != null) {
+            mConnectThread.cancel();
+            mConnectThread = null;
         }
 
-        @Override
-        protected void onPostExecute(Void aVoid) {
-            if (mStatus) {
-                Context context = getApplicationContext();
-                CharSequence text = "Bluetooth Connected";
-                int duration = Toast.LENGTH_SHORT;
+        // Cancel any thread currently running a connection
+        if (mConnectedThread != null) {
+            mConnectedThread.cancel();
+            mConnectedThread = null;
+        }
 
-                Toast toast = Toast.makeText(context, text, duration);
-                toast.show();
+        setState(STATE_LISTEN);
 
-                new SendDataOverBluetooth().execute();
-            }
-
+        // Start the thread to listen on a BluetoothServerSocket
+        if (mAcceptThread == null) {
+            mAcceptThread = new AcceptThread();
+            mAcceptThread.start();
         }
     }
 
-    private class SendDataOverBluetooth extends AsyncTask<Void, Void, Void> {
+    /**
+     * Start the ConnectThread to initiate a connection to a remote device.
+     *
+     * @param device_address The address of the BluetoothDevice to connect
+     */
+    public synchronized void connect(String device_address, boolean sendToSocket) {
 
-        private boolean mStatus = true;
+        BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(device_address);
+        Log.d(TAG, "connect to: " + device);
 
-        @Override
-        protected Void doInBackground(Void... params) {
+        // Cancel any thread attempting to make a connection
+        if (mState == STATE_CONNECTING) {
+            if (mConnectThread != null) {
+                mConnectThread.cancel();
+                mConnectThread = null;
+            }
+        }
+
+        // Cancel any thread currently running a connection
+        if (mConnectedThread != null) {
+            mConnectedThread.cancel();
+            mConnectedThread = null;
+        }
+
+        // Start the thread to connect with the given device
+        mConnectThread = new ConnectThread(device, sendToSocket);
+        mConnectThread.start();
+        setState(STATE_CONNECTING);
+    }
+
+    /**
+     * Start the ConnectedThread to begin managing a Bluetooth connection
+     *
+     * @param socket The BluetoothSocket on which the connection was made
+     */
+    public synchronized void connected(BluetoothSocket socket, boolean sendToSocket) {
+        Log.d(TAG, "connected");
+
+        // Cancel the thread that completed the connection
+        if (mConnectThread != null) {
+            mConnectThread.cancel();
+            mConnectThread = null;
+        }
+
+        // Cancel any thread currently running a connection
+        if (mConnectedThread != null) {
+            mConnectedThread.cancel();
+            mConnectedThread = null;
+        }
+
+        // Cancel the accept thread because we only want to connect to one device
+        if (mAcceptThread != null) {
+            Log.d(TAG, "Calling mAcceptThread.cancel");
+            mAcceptThread.cancel();
+            Log.d(TAG, "Setting mAcceptThread to null");
+            mAcceptThread = null;
+        }
+
+        // Start the thread to manage the connection and perform transmissions
+        mConnectedThread = new ConnectedThread(socket, sendToSocket);
+        mConnectedThread.start();
+
+        setState(STATE_CONNECTED);
+    }
+
+    public void write() {
+        if (mConnectedThread != null) {
+            Log.d(TAG, "ConnectThread reading from file and sending to socket");
+            mConnectedThread.write();
+        } else {
+            Log.d(TAG, "ConnectThread null CANNOT read from file and send to socket");
+        }
+    }
+
+    /**
+     * Stop all threads
+     */
+    public synchronized void stop() {
+        Log.d(TAG, "stop");
+
+        if (mConnectThread != null) {
+            mConnectThread.cancel();
+            mConnectThread = null;
+        }
+
+        if (mConnectedThread != null) {
+            mConnectedThread.cancel();
+            mConnectedThread = null;
+        }
+
+        if (mAcceptThread != null) {
+            mAcceptThread.cancel();
+            mAcceptThread = null;
+        }
+
+        setState(STATE_NONE);
+    }
+
+    /**
+     * Indicate that the connection attempt failed and notify the UI Activity.
+     */
+    private void connectionFailedOrLost() {
+
+        // Start the service over to restart listening mode
+        BluetoothLeService.this.start();
+    }
+
+
+    /**
+     * This thread runs while listening for incoming connections. It behaves
+     * like a server-side client. It runs until a connection is accepted
+     * (or until cancelled).
+     */
+    private class AcceptThread extends Thread {
+        // The local server socket
+        private final BluetoothServerSocket mmServerSocket;
+
+
+        public AcceptThread() {
+            BluetoothServerSocket tmp;
+
+            /* Use the Reflection method to access hidden java function
+             * into BluetoothAdapter class.
+             */
+            final Class BTAClass;
+            final Method BTAClassMethod;
+
             try {
-                byte[] contents = new byte[1024];
-                int byte_written = 0;
-                final File sdcard = Environment.getExternalStorageDirectory();
-                fileToPlay = new File(sdcard.getAbsolutePath() + Constants.FOLDER + Constants.FILE);
+                BTAClass = Class.forName(mBluetoothAdapter.getClass().getName());
+            } catch (ClassNotFoundException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+                mmServerSocket = null;
+                return;
+            }
 
-                FileInputStream fileinputstr = new FileInputStream(fileToPlay);
-                BufferedInputStream buf = new BufferedInputStream(fileinputstr);
-                Log.d(TAG, "TLG --------- File Opened -----------");
+            try {
+                Class[] cArg = new Class[1];
+                cArg[0] = int.class;
+                BTAClassMethod = BTAClass.getDeclaredMethod("listenUsingL2capOn", cArg);
+            } catch (NoSuchMethodException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+                mmServerSocket = null;
+                return;
+            }
 
-                if(mBTSocket.isConnected()) {
-                    OutputStream outputStream = mBTSocket.getOutputStream();
-                    while ( ((byte_written = buf.read(contents, 0, 1024 )) > 0 ) && (mBTSocket.isConnected()) ) {
-                        Log.d(TAG, "TLG --------- Writing " + byte_written + " bytes Master -> Slave ----------- ");
-                        outputStream.write(contents, 0, byte_written);
-                        SystemClock.sleep(10);
-                        Log.d(TAG, "TLG --------- Writing completed ----------- ");
-                    }
-                    buf.close();
-                } else {
-                    mStatus = false;
+            BTAClassMethod.setAccessible(true);
+
+            try {
+                tmp = (BluetoothServerSocket) BTAClassMethod.invoke(mBluetoothAdapter, 0x20025);
+                Log.d(TAG, "listenUsingL2capOn");
+            } catch (InvocationTargetException|IllegalAccessException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+                mmServerSocket = null;
+                return;
+            }
+
+            mmServerSocket = tmp;
+        }
+
+        public void run() {
+            Log.d(TAG, "BEGIN mAcceptThread "+this);
+            setName("AcceptThread");
+
+            BluetoothSocket socket;
+
+            // Listen to the server socket if we're not connected
+            while (mState != STATE_CONNECTED) {
+                try {
+                    // This is a blocking call and will only return on a
+                    // successful connection or an exception
+                    socket = mmServerSocket.accept();
+                } catch (IOException e) {
+                    Log.e(TAG, "accept() failed "+this, e);
+                    break;
                 }
 
-
-            } catch (IOException e) {
-                Log.e(TAG, "ERROR connect the BluetoothSocket");
-                mStatus = false;
+                // If a connection was accepted
+                if (socket != null) {
+                    synchronized (BluetoothLeService.this) {
+                        switch (mState) {
+                            case STATE_LISTEN:
+                            case STATE_CONNECTING:
+                                // Situation normal. Start the connected thread.
+                                connected(socket, false);
+                                break;
+                            case STATE_NONE:
+                            case STATE_CONNECTED:
+                                // Either not ready or already connected. Terminate new socket.
+                                try {
+                                    socket.close();
+                                } catch (IOException e) {
+                                    Log.e(TAG, "Could not close unwanted socket", e);
+                                }
+                                break;
+                        }
+                    }
+                }
             }
-            return null;
+            Log.i(TAG, "END mAcceptThread");
         }
 
-        @Override
-        protected void onPostExecute(Void aVoid) {
-            if (mStatus) {
-                Context context = getApplicationContext();
-                CharSequence text = "Data Sent... closing the Socket";
-                int duration = Toast.LENGTH_SHORT;
-
-                Toast toast = Toast.makeText(context, text, duration);
-                toast.show();
+        public void cancel() {
+            Log.d(TAG, "cancel " + this);
+            try {
+                mmServerSocket.close();
+                Log.d(TAG, "cancel ServerSocket closed");
+            } catch (IOException e) {
+                Log.e(TAG, "close() of server failed", e);
             }
+        }
+    }
+
+
+
+    /**
+     * This thread runs while attempting to make an outgoing connection
+     * with a device. It runs straight through; the connection either
+     * succeeds or fails.
+     */
+    private class ConnectThread extends Thread {
+        private final BluetoothSocket mmSocket;
+        private final BluetoothDevice mmDevice;
+        private final boolean mmSendToSocket;
+
+        public ConnectThread(BluetoothDevice device, boolean sendToSocket) {
+            mmDevice = device;
+            mmSendToSocket = sendToSocket;
+
+            BluetoothSocket tmp;
+
+            final Class BTDClass;
+            final Method BTDClassMethod;
 
             try {
-                mBTSocket.close();
+                BTDClass = Class.forName(mmDevice.getClass().getName());
+            } catch (ClassNotFoundException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
+                mmSocket = null;
+                return;
+            }
+            try {
+                Class[] cArg = new Class[1];
+                cArg[0] = int.class;
+                BTDClassMethod = BTDClass.getDeclaredMethod("createL2capSocket", cArg);
+            } catch (NoSuchMethodException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
+                mmSocket = null;
+                return;
+            }
+            BTDClassMethod.setAccessible(true);
+
+            try {
+                tmp = (BluetoothSocket) BTDClassMethod.invoke(device, 0x20025);
+            } catch (IllegalAccessException|InvocationTargetException e) {
+                Log.e(TAG, "ERROR setting up the Reflection for createL2capSocket");
+                mmSocket = null;
+                return;
+            }
+            mmSocket = tmp;
+        }
+
+        public void run() {
+            Log.i(TAG, "BEGIN mConnectThread");
+            setName("ConnectThread");
+
+            // Always cancel discovery because it will slow down a connection
+            mBluetoothAdapter.cancelDiscovery();
+
+            // Make a connection to the BluetoothSocket
+            try {
+                // This is a blocking call and will only return on a
+                // successful connection or an exception
+                mmSocket.connect();
             } catch (IOException e) {
-                Log.e(TAG, "ERROR closing the BluetoothSocket");
+                // Close the socket
+                try {
+                    mmSocket.close();
+                } catch (IOException e2) {
+                    Log.e(TAG, "unable to close() during connection failure", e2);
+                }
+                connectionFailedOrLost();
+                return;
+            }
+
+            // Reset the ConnectThread because we're done
+            synchronized (BluetoothLeService.this) {
+                mConnectThread = null;
+            }
+
+            // Start the connected thread
+            connected(mmSocket, mmSendToSocket);
+        }
+
+        public void cancel() {
+            try {
+                mmSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "close() of connect socket failed", e);
+            }
+        }
+    }
+
+
+    /**
+     * This thread runs during a connection with a remote device.
+     * It handles all incoming and outgoing transmissions.
+     */
+    private class ConnectedThread extends Thread {
+        private final BluetoothSocket mmSocket;
+        private final boolean mmSendToSocket;
+        private final InputStream mmInStream;
+        private final OutputStream mmOutStream;
+
+        public ConnectedThread(BluetoothSocket socket, boolean sendToSocket) {
+            Log.d(TAG, "create ConnectedThread");
+            mmSocket = socket;
+            mmSendToSocket = sendToSocket;
+            InputStream tmpIn = null;
+            OutputStream tmpOut = null;
+
+            // Get the BluetoothSocket input and output streams
+            try {
+                tmpIn = socket.getInputStream();
+                tmpOut = socket.getOutputStream();
+            } catch (IOException e) {
+                Log.e(TAG, "temp sockets not created", e);
+            }
+
+            mmInStream = tmpIn;
+            mmOutStream = tmpOut;
+        }
+
+        public void run() {
+            Log.i(TAG, "BEGIN mConnectedThread");
+            byte[] buffer = new byte[1024];
+            int bytes;
+            BufferedOutputStream bufOutStr;
+
+            final File sdcard = Environment.getExternalStorageDirectory();
+            fileToWrite = new File(sdcard.getAbsolutePath() + Constants.FOLDER + Constants.FILE_OUTPUT);
+            try {
+                bufOutStr = new BufferedOutputStream(new FileOutputStream(fileToWrite));
+            } catch (FileNotFoundException e) {
+                Log.e(TAG, "TLG --------- File cannot be opened -----------");
+                return;
+            }
+
+            if (mmSendToSocket) {
+                // Keep listening to the InputStream while connected
+                while (true) {
+                    try {
+                        // Read from the InputStream
+                        Log.i(TAG, "prepare to read from the buffer");
+                        bytes = mmInStream.read(buffer);
+                        Log.i(TAG, "read from the buffer " + bytes);
+                        bufOutStr.write(buffer);
+                        Log.i(TAG, "write buffer to the file from the buffer ");
+                    } catch (IOException e) {
+                        Log.e(TAG, "disconnected", e);
+                        connectionFailedOrLost();
+                        // Start the service over to restart listening mode
+                        BluetoothLeService.this.start();
+                        break;
+                    }
+                }
+            } else {
+                write();
+            }
+        }
+
+        /**
+         * Write to the connected OutStream.
+         */
+        public void write() {
+
+            // Open the file
+            byte[] buffer = new byte[1024];
+            BufferedInputStream bufInStr;
+
+            final File sdcard = Environment.getExternalStorageDirectory();
+            fileToPlay = new File(sdcard.getAbsolutePath() + Constants.FOLDER + Constants.FILE_INPUT);
+            try {
+                bufInStr = new BufferedInputStream(new FileInputStream(fileToPlay));
+            } catch (FileNotFoundException e) {
+                Log.e(TAG, "TLG --------- File cannot be opened -----------");
+                return;
+            }
+            try {
+                Log.d(TAG, "TLG --------- File Opened: available " + bufInStr.available() + "-----------");
+            } catch (IOException e) {
+                Log.e(TAG, "TLG --------- File read issue with available() -----------");
+            }
+
+            // read from the file till EOF
+            try {
+                while (!(bufInStr.read(buffer) < 0))
+                {
+                    mmOutStream.write(buffer);
+                    Log.d(TAG, "TLG --------- Written " + buffer.length + " ; Remaining available " + bufInStr.available() + "-----------");
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "TLG --------- File cannot read -----------");
+            }
+        }
+
+        public void cancel() {
+            try {
+                mmSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "close() of connect socket failed", e);
             }
         }
     }
@@ -264,7 +585,6 @@ public class BluetoothLeService extends Service {
     public void disconnect() {
         if (mBluetoothAdapter == null) {
             Log.w(TAG, "BluetoothAdapter not initialized");
-            return;
         }
     }
 
@@ -274,7 +594,6 @@ public class BluetoothLeService extends Service {
      */
     public void close() {
         Log.d(TAG, "Close called");
-
     }
 
 }
