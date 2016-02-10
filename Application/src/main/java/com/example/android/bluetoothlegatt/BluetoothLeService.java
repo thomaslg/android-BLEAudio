@@ -496,7 +496,7 @@ public class BluetoothLeService extends Service {
 
         public void run() {
             Log.i(TAG, "BEGIN mConnectedThread");
-            byte[] buffer = new byte[1024];
+            byte[] buffer = new byte[Constants.BUFFER_SIZE];
             int bytes;
             BufferedOutputStream bufOutStr;
 
@@ -538,7 +538,7 @@ public class BluetoothLeService extends Service {
         public void write() {
 
             // Open the file
-            byte[] buffer = new byte[1024];
+            byte[] buffer = new byte[Constants.BUFFER_SIZE];
             BufferedInputStream bufInStr;
 
             final File sdcard = Environment.getExternalStorageDirectory();
@@ -561,9 +561,12 @@ public class BluetoothLeService extends Service {
                 {
                     mmOutStream.write(buffer);
                     Log.d(TAG, "TLG --------- Written " + buffer.length + " ; Remaining available " + bufInStr.available() + "-----------");
+                    sleep(Constants.PERIOD_SIZE, 0);
                 }
             } catch (IOException e) {
                 Log.e(TAG, "TLG --------- File cannot read -----------");
+            } catch (InterruptedException e) {
+                Log.e(TAG, "TLG --------- Insomnia issue -----------");
             }
         }
 

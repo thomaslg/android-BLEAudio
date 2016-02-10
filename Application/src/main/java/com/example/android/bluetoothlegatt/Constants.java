@@ -12,5 +12,8 @@ public class Constants {
     public static final String FOLDER = "/Development/NXP_BLE";
     public static final String FILE_INPUT = "/input.txt";
     public static final String FILE_OUTPUT = "/output.txt";
+    public static final int BUFFER_SIZE = 988;
+    public static final int PERIOD_SIZE = 10;
+
 
 }
