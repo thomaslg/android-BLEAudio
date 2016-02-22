@@ -10,10 +10,9 @@ public class Constants {
             .fromString("0000b81d-0000-1000-8000-00805f9b34fb");
 
     public static final String FOLDER = "/Development/NXP_BLE";
-    public static final String FILE_INPUT = "/input.txt";
-    public static final String FILE_OUTPUT = "/output.txt";
-    public static final int BUFFER_SIZE = 988;
-    public static final int PERIOD_SIZE = 10;
-
+    public static final String FILE_INPUT = "/input.pcm";
+    public static final String FILE_OUTPUT = "/output.pcm";
+    public static final int BUFFER_SIZE = 6144;
+    public static final int PERIOD_SIZE = 8;
 
 }

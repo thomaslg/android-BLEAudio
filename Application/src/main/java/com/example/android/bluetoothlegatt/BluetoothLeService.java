@@ -509,7 +509,7 @@ public class BluetoothLeService extends Service {
                 return;
             }
 
-            if (mmSendToSocket) {
+            if (mmSendToSocket == false) {
                 // Keep listening to the InputStream while connected
                 while (true) {
                     try {
