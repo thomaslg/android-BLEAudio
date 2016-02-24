@@ -1,6 +1,10 @@
 /*
  * Copyright (C) 2013 The Android Open Source Project
  *
+ * This application has been inspired by the project
+ * BluetoothLeGatt and BluetoothChat from the Google Android sample code.
+ * Adaptation made by NXP Semiconductors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -24,6 +28,8 @@ import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
 import android.os.Binder;
 import android.os.Environment;
 import android.os.IBinder;
@@ -56,9 +62,10 @@ public class BluetoothLeService extends Service {
 
     // Member fields
     //private final Handler mHandler;
-    private AcceptThread mAcceptThread;
-    private ConnectThread mConnectThread;
-    private ConnectedThread mConnectedThread;
+    private ListeningThread mListeningThread;
+    private ConnectingThread mConnectingThread;
+    private AudioTxThread mAudioTxThread;
+
     private int mState;
 
     // Constants that indicate the current connection state
@@ -66,7 +73,6 @@ public class BluetoothLeService extends Service {
     public static final int STATE_LISTEN = 1;     // now listening for incoming connections
     public static final int STATE_CONNECTING = 2; // now initiating an outgoing connection
     public static final int STATE_CONNECTED = 3;  // now connected to a remote device
-
 
     public class LocalBinder extends Binder {
         BluetoothLeService getService() {
@@ -135,35 +141,35 @@ public class BluetoothLeService extends Service {
     }
 
     /**
-     * Start the Bluetooth service. Specifically start AcceptThread to begin a
+     * Start the Bluetooth service. Specifically start ListeningThread to begin a
      * session in listening (server) mode. Called by the Activity onResume()
      */
     public synchronized void start() {
         Log.d(TAG, "start");
 
         // Cancel any thread attempting to make a connection
-        if (mConnectThread != null) {
-            mConnectThread.cancel();
-            mConnectThread = null;
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
         }
 
         // Cancel any thread currently running a connection
-        if (mConnectedThread != null) {
-            mConnectedThread.cancel();
-            mConnectedThread = null;
+        if (mAudioTxThread != null) {
+            mAudioTxThread.cancel();
+            mAudioTxThread = null;
         }
 
         setState(STATE_LISTEN);
 
         // Start the thread to listen on a BluetoothServerSocket
-        if (mAcceptThread == null) {
-            mAcceptThread = new AcceptThread();
-            mAcceptThread.start();
+        if (mListeningThread == null) {
+            mListeningThread = new ListeningThread();
+            mListeningThread.start();
         }
     }
 
     /**
-     * Start the ConnectThread to initiate a connection to a remote device.
+     * Start the ConnectingThread to initiate a connection to a remote device.
      *
      * @param device_address The address of the BluetoothDevice to connect
      */
@@ -174,26 +180,26 @@ public class BluetoothLeService extends Service {
 
         // Cancel any thread attempting to make a connection
         if (mState == STATE_CONNECTING) {
-            if (mConnectThread != null) {
-                mConnectThread.cancel();
-                mConnectThread = null;
+            if (mConnectingThread != null) {
+                mConnectingThread.cancel();
+                mConnectingThread = null;
             }
         }
 
         // Cancel any thread currently running a connection
-        if (mConnectedThread != null) {
-            mConnectedThread.cancel();
-            mConnectedThread = null;
+        if (mAudioTxThread != null) {
+            mAudioTxThread.cancel();
+            mAudioTxThread = null;
         }
 
         // Start the thread to connect with the given device
-        mConnectThread = new ConnectThread(device, sendToSocket);
-        mConnectThread.start();
+        mConnectingThread = new ConnectingThread(device, sendToSocket);
+        mConnectingThread.start();
         setState(STATE_CONNECTING);
     }
 
     /**
-     * Start the ConnectedThread to begin managing a Bluetooth connection
+     * Start the AudioTxThread to begin managing a Bluetooth connection
      *
      * @param socket The BluetoothSocket on which the connection was made
      */
@@ -201,40 +207,40 @@ public class BluetoothLeService extends Service {
         Log.d(TAG, "connected");
 
         // Cancel the thread that completed the connection
-        if (mConnectThread != null) {
-            mConnectThread.cancel();
-            mConnectThread = null;
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
         }
 
         // Cancel any thread currently running a connection
-        if (mConnectedThread != null) {
-            mConnectedThread.cancel();
-            mConnectedThread = null;
+        if (mAudioTxThread != null) {
+            mAudioTxThread.cancel();
+            mAudioTxThread = null;
         }
 
         // Cancel the accept thread because we only want to connect to one device
-        if (mAcceptThread != null) {
-            Log.d(TAG, "Calling mAcceptThread.cancel");
-            mAcceptThread.cancel();
-            Log.d(TAG, "Setting mAcceptThread to null");
-            mAcceptThread = null;
+        if (mListeningThread != null) {
+            Log.d(TAG, "Calling mListeningThread.cancel");
+            mListeningThread.cancel();
+            Log.d(TAG, "Setting mListeningThread to null");
+            mListeningThread = null;
         }
 
         // Start the thread to manage the connection and perform transmissions
-        mConnectedThread = new ConnectedThread(socket, sendToSocket);
-        mConnectedThread.start();
+        mAudioTxThread = new AudioTxThread(socket, sendToSocket);
+        mAudioTxThread.start();
 
         setState(STATE_CONNECTED);
     }
 
-    public void write() {
-        if (mConnectedThread != null) {
-            Log.d(TAG, "ConnectThread reading from file and sending to socket");
-            mConnectedThread.write();
-        } else {
-            Log.d(TAG, "ConnectThread null CANNOT read from file and send to socket");
-        }
-    }
+//    public void write() {
+//        if (mAudioTxThread != null) {
+//            Log.d(TAG, "ConnectingThread reading from file and sending to socket");
+//            mAudioTxThread.write();
+//        } else {
+//            Log.d(TAG, "ConnectingThread null CANNOT read from file and send to socket");
+//        }
+//    }
 
     /**
      * Stop all threads
@@ -242,19 +248,19 @@ public class BluetoothLeService extends Service {
     public synchronized void stop() {
         Log.d(TAG, "stop");
 
-        if (mConnectThread != null) {
-            mConnectThread.cancel();
-            mConnectThread = null;
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
         }
 
-        if (mConnectedThread != null) {
-            mConnectedThread.cancel();
-            mConnectedThread = null;
+        if (mAudioTxThread != null) {
+            mAudioTxThread.cancel();
+            mAudioTxThread = null;
         }
 
-        if (mAcceptThread != null) {
-            mAcceptThread.cancel();
-            mAcceptThread = null;
+        if (mListeningThread != null) {
+            mListeningThread.cancel();
+            mListeningThread = null;
         }
 
         setState(STATE_NONE);
@@ -275,12 +281,12 @@ public class BluetoothLeService extends Service {
      * like a server-side client. It runs until a connection is accepted
      * (or until cancelled).
      */
-    private class AcceptThread extends Thread {
+    private class ListeningThread extends Thread {
         // The local server socket
         private final BluetoothServerSocket mmServerSocket;
 
 
-        public AcceptThread() {
+        public ListeningThread() {
             BluetoothServerSocket tmp;
 
             /* Use the Reflection method to access hidden java function
@@ -322,8 +328,8 @@ public class BluetoothLeService extends Service {
         }
 
         public void run() {
-            Log.d(TAG, "BEGIN mAcceptThread "+this);
-            setName("AcceptThread");
+            Log.d(TAG, "BEGIN mListeningThread "+this);
+            setName("ListeningThread");
 
             BluetoothSocket socket;
 
@@ -360,7 +366,7 @@ public class BluetoothLeService extends Service {
                     }
                 }
             }
-            Log.i(TAG, "END mAcceptThread");
+            Log.i(TAG, "END mListeningThread");
         }
 
         public void cancel() {
@@ -381,12 +387,12 @@ public class BluetoothLeService extends Service {
      * with a device. It runs straight through; the connection either
      * succeeds or fails.
      */
-    private class ConnectThread extends Thread {
+    private class ConnectingThread extends Thread {
         private final BluetoothSocket mmSocket;
         private final BluetoothDevice mmDevice;
         private final boolean mmSendToSocket;
 
-        public ConnectThread(BluetoothDevice device, boolean sendToSocket) {
+        public ConnectingThread(BluetoothDevice device, boolean sendToSocket) {
             mmDevice = device;
             mmSendToSocket = sendToSocket;
 
@@ -424,8 +430,8 @@ public class BluetoothLeService extends Service {
         }
 
         public void run() {
-            Log.i(TAG, "BEGIN mConnectThread");
-            setName("ConnectThread");
+            Log.i(TAG, "BEGIN mConnectingThread");
+            setName("ConnectingThread");
 
             // Always cancel discovery because it will slow down a connection
             mBluetoothAdapter.cancelDiscovery();
@@ -446,9 +452,9 @@ public class BluetoothLeService extends Service {
                 return;
             }
 
-            // Reset the ConnectThread because we're done
+            // Reset the ConnectingThread because we're done
             synchronized (BluetoothLeService.this) {
-                mConnectThread = null;
+                mConnectingThread = null;
             }
 
             // Start the connected thread
@@ -469,14 +475,23 @@ public class BluetoothLeService extends Service {
      * This thread runs during a connection with a remote device.
      * It handles all incoming and outgoing transmissions.
      */
-    private class ConnectedThread extends Thread {
+    private class AudioTxThread extends Thread {
         private final BluetoothSocket mmSocket;
         private final boolean mmSendToSocket;
         private final InputStream mmInStream;
         private final OutputStream mmOutStream;
 
-        public ConnectedThread(BluetoothSocket socket, boolean sendToSocket) {
-            Log.d(TAG, "create ConnectedThread");
+        protected int minRecordBuffSizeInBytes;
+        protected AudioRecord audioRecord;
+        protected byte[] recordingByteArray;
+
+        private int minTrackBuffSizeInBytes;
+        private AudioTrack audioTrack;
+        private byte[] trackByteArray;
+
+
+        public AudioTxThread(BluetoothSocket socket, boolean sendToSocket) {
+            Log.d(TAG, "create AudioTxThread");
             mmSocket = socket;
             mmSendToSocket = sendToSocket;
             InputStream tmpIn = null;
@@ -492,12 +507,89 @@ public class BluetoothLeService extends Service {
 
             mmInStream = tmpIn;
             mmOutStream = tmpOut;
+
+            if (Constants.AUDIO_FROM_MIC) {
+                Log.d(TAG, "Writing from microphone selected");
+
+                // Get minimum buffer size returned for the format
+                minRecordBuffSizeInBytes = AudioRecord.getMinBufferSize(Constants.SAMPLE_RATE,
+                        Constants.CHANNEL_IN_CONFIG, Constants.AUDIO_FORMAT);
+
+                // Allocate the byte array to read the audio data
+                recordingByteArray = new byte[minRecordBuffSizeInBytes];
+
+                // Instantiate the Recorder
+                audioRecord = new AudioRecord(Constants.AUDIO_SOURCE, Constants.SAMPLE_RATE,
+                        Constants.CHANNEL_IN_CONFIG, Constants.AUDIO_FORMAT,
+                        4 * minRecordBuffSizeInBytes);
+                Log.d(TAG, "microphone reader / AudioRecord initialized");
+
+            }
+
+            if (Constants.AUDIO_TO_SPEAKER) {
+                // Get minimum buffer size returned for the format
+                minTrackBuffSizeInBytes = AudioTrack.getMinBufferSize(Constants.SAMPLE_RATE,
+                        Constants.CHANNEL_OUT_CONFIG, Constants.AUDIO_FORMAT);
+
+                // Allocate the byte array to write the audio data to the track
+                trackByteArray = new byte[minTrackBuffSizeInBytes];
+
+                // Instantiate the native player
+                audioTrack = new AudioTrack(Constants.AUDIO_STREAM, Constants.SAMPLE_RATE,
+                        Constants.CHANNEL_OUT_CONFIG, Constants.AUDIO_FORMAT, 4 * minTrackBuffSizeInBytes,
+                        AudioTrack.MODE_STREAM);
+            }
+
         }
 
         public void run() {
-            Log.i(TAG, "BEGIN mConnectedThread");
-            byte[] buffer = new byte[Constants.BUFFER_SIZE];
+            Log.i(TAG, "BEGIN mAudioTxThread");
+
+            if (mmSendToSocket == false) {
+                if (Constants.AUDIO_TO_SPEAKER) {
+                    push_to_speaker();
+                } else {
+                    if (Constants.AUDIO_LOOPBACK) {
+                        push_back_to_sender();
+                    } else {
+                        push_to_file();
+                    }
+                }
+            } else {
+                if (Constants.AUDIO_FROM_MIC) {
+                    write_from_mic();
+                } else {
+                    write_from_file();
+                }
+            }
+        }
+
+        public void push_to_speaker() {
+            int bytesRead = 0;
+            Log.i(TAG, "Calling AudioTrack play");
+            audioTrack.play();
+
+            while (true) {
+                try {
+                    // sync reading with reloading of input stream
+                    synchronized (this) {
+                        bytesRead = mmInStream.read(trackByteArray, 0, minTrackBuffSizeInBytes);
+                        Log.i(TAG, "read from HCI " + bytesRead + " bytes...");
+                    }
+                } catch (final IOException ioe) {
+                    ioe.printStackTrace();
+                }
+
+                if (bytesRead > 0) {
+                    Log.i(TAG, "...and write "+ bytesRead +" to speaker.");
+                    audioTrack.write(trackByteArray, 0, bytesRead);
+                }
+            }
+        }
+
+        public void push_to_file() {
             int bytes;
+            byte[] buffer = new byte[Constants.BUFFER_SIZE];
             BufferedOutputStream bufOutStr;
 
             final File sdcard = Environment.getExternalStorageDirectory();
@@ -509,33 +601,67 @@ public class BluetoothLeService extends Service {
                 return;
             }
 
-            if (mmSendToSocket == false) {
-                // Keep listening to the InputStream while connected
-                while (true) {
-                    try {
-                        // Read from the InputStream
-                        Log.i(TAG, "prepare to read from the buffer");
-                        bytes = mmInStream.read(buffer);
-                        Log.i(TAG, "read from the buffer " + bytes);
+            // Keep listening to the InputStream while connected
+            while (true) {
+                try {
+                    // Read from the InputStream
+                    Log.i(TAG, "Prepare to read from the buffer");
+                    bytes = mmInStream.read(buffer);
+                    if (bytes > 0) {
+                        Log.i(TAG, "read from HCI " + bytes + " bytes and write them to file.");
                         bufOutStr.write(buffer);
-                        Log.i(TAG, "write buffer to the file from the buffer ");
-                    } catch (IOException e) {
-                        Log.e(TAG, "disconnected", e);
-                        connectionFailedOrLost();
-                        // Start the service over to restart listening mode
-                        BluetoothLeService.this.start();
-                        break;
+                    }
+                } catch (IOException e) {
+                    Log.e(TAG, "disconnected", e);
+                    connectionFailedOrLost();
+                    // Start the service over to restart listening mode
+                    BluetoothLeService.this.start();
+                    break;
+                }
+            }
+        }
+
+        public void push_back_to_sender() {
+            int byteRead = 0;
+            byte[] buffer = new byte[Constants.BUFFER_SIZE];
+
+            try {
+                while (true) {
+                    Log.i(TAG, "Prepare to read from the buffer");
+                    byteRead = mmInStream.read(buffer);
+                    if (byteRead > 0) {
+                        Log.i(TAG, "Prepare to read from the microphone");
+                        mmOutStream.write(buffer);
                     }
                 }
-            } else {
-                write();
+            } catch (IOException e) {
+                Log.e(TAG, "Loopback mode: issue with looping back streams");
+            }
+        }
+        /**
+         * Write to the connected OutStream.
+         */
+        public void write_from_mic() {
+            int byteRead = 0;
+            // read from the file till EOF
+            try {
+                audioRecord.startRecording();
+                while (true) {
+                    Log.i(TAG, "Prepare to read from the microphone");
+                    while ((byteRead = audioRecord.read(recordingByteArray, 0, minRecordBuffSizeInBytes)) > 0) {
+                        mmOutStream.write(recordingByteArray);
+                        Log.i(TAG, "read from microphone " + byteRead + " bytes and write them to HCI.");
+                    }
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "TLG --------- Mic cannot read -----------");
             }
         }
 
         /**
          * Write to the connected OutStream.
          */
-        public void write() {
+        public void write_from_file() {
 
             // Open the file
             byte[] buffer = new byte[Constants.BUFFER_SIZE];
@@ -598,5 +724,6 @@ public class BluetoothLeService extends Service {
     public void close() {
         Log.d(TAG, "Close called");
     }
-
 }
+
+
