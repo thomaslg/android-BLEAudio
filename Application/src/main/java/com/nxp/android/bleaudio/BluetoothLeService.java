@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-package com.example.android.bluetoothlegatt;
+package com.nxp.android.bleaudio;
 
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
@@ -334,7 +334,7 @@ public class BluetoothLeService extends Service {
             BluetoothSocket socket;
 
             // Listen to the server socket if we're not connected
-            while (mState != STATE_CONNECTED) {
+            while ((mState != STATE_CONNECTED) && (mmServerSocket != null)) {
                 try {
                     // This is a blocking call and will only return on a
                     // successful connection or an exception

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.example.android.bluetoothlegatt;
+package com.nxp.android.bleaudio;
 
 import android.annotation.TargetApi;
 import android.app.Activity;
@@ -69,7 +69,7 @@ public class DeviceScanActivity extends ListActivity {
 
 
     public static final String ADVERTISING_FAILED =
-            "com.example.android.bluetoothadvertisements.advertising_failed";
+            "com.nxp.android.bluetoothadvertisements.advertising_failed";
 
     public static final String ADVERTISING_FAILED_EXTRA_CODE = "failureCode";
 

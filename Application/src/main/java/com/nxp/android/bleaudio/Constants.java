@@ -1,4 +1,4 @@
-package com.example.android.bluetoothlegatt;
+package com.nxp.android.bleaudio;
 
 import android.media.AudioFormat;
 import android.media.AudioManager;
