@@ -16,6 +16,7 @@ public class Constants {
 
     public static final boolean AUDIO_TO_SPEAKER = true;
     public static final boolean AUDIO_LOOPBACK = false;
+    public static final boolean AUDIO_TO_FILE = false;
 
     public static final int SAMPLE_RATE = 48000;
     public static final int AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_COMMUNICATION;
