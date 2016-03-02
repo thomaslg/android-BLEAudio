@@ -28,6 +28,8 @@ import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.os.Binder;
@@ -510,15 +512,15 @@ public class BluetoothLeService extends Service {
             }
             mmOutStream = tmpOut;
 
+            // Get minimum buffer size returned for the format
+            minRecordBuffSizeInBytes = AudioRecord.getMinBufferSize(Constants.SAMPLE_RATE,
+                    Constants.CHANNEL_IN_CONFIG, Constants.AUDIO_FORMAT);
+
+            // Allocate the byte array to read the audio data
+            recordingByteArray = new byte[minRecordBuffSizeInBytes];
+
             if (Constants.AUDIO_FROM_MIC) {
                 Log.d(TAG, "Writing from microphone selected");
-
-                // Get minimum buffer size returned for the format
-                minRecordBuffSizeInBytes = AudioRecord.getMinBufferSize(Constants.SAMPLE_RATE,
-                        Constants.CHANNEL_IN_CONFIG, Constants.AUDIO_FORMAT);
-
-                // Allocate the byte array to read the audio data
-                recordingByteArray = new byte[minRecordBuffSizeInBytes];
 
                 // Instantiate the Recorder
                 audioRecord = new AudioRecord(Constants.AUDIO_SOURCE, Constants.SAMPLE_RATE,
@@ -566,7 +568,6 @@ public class BluetoothLeService extends Service {
 
             // Open the file
             File fileToPlay;
-            byte[] buffer = new byte[Constants.BUFFER_SIZE];
             BufferedInputStream bufInStr;
 
             final File sdcard = Environment.getExternalStorageDirectory();
@@ -585,11 +586,15 @@ public class BluetoothLeService extends Service {
 
             // read from the file till EOF
             try {
-                while (!(bufInStr.read(buffer) < 0))
+                while (!(bufInStr.read(recordingByteArray, 0, minRecordBuffSizeInBytes) < 0))
                 {
-                    mmOutStream.write(buffer);
-                    Log.d(TAG, "TLG --------- Written " + buffer.length + " ; Remaining available " + bufInStr.available() + "-----------");
-                    sleep(Constants.PERIOD_SIZE, 0);
+                    mmOutStream.write(recordingByteArray);
+                    Log.d(TAG, "TLG --------- Written " + minRecordBuffSizeInBytes + " bytes and "+ bufInStr.available() + " bytes remaining --------");
+                    int channelNb = (Constants.CHANNEL_IN_CONFIG == AudioFormat.CHANNEL_IN_STEREO? 2 : 1);
+                    int bytePerMSec = (Constants.SAMPLE_RATE/1000) * 2 * channelNb;
+                    int MsPerFrame = minRecordBuffSizeInBytes/bytePerMSec;
+                    Log.d(TAG, "Sleeping now " + MsPerFrame + "ms.");
+                    sleep(MsPerFrame, 0);
                 }
             } catch (IOException e) {
                 Log.e(TAG, "TLG --------- File cannot read -----------");
@@ -597,6 +602,7 @@ public class BluetoothLeService extends Service {
                 Log.e(TAG, "TLG --------- Insomnia issue -----------");
             }
         }
+
 
         public void cancel() {
             try {
@@ -620,7 +626,7 @@ public class BluetoothLeService extends Service {
         private OutputStream mmOutStream;
         private final boolean mmTxActive;
 
-
+        private AudioManager mAudioManager;
         private int minTrackBuffSizeInBytes;
         private AudioTrack audioTrack;
         private byte[] trackByteArray;
@@ -649,18 +655,21 @@ public class BluetoothLeService extends Service {
             mmInStream = tmpIn;
             mmOutStream = tmpOut;
 
-            if (Constants.AUDIO_TO_SPEAKER) {
-                // Get minimum buffer size returned for the format
-                minTrackBuffSizeInBytes = AudioTrack.getMinBufferSize(Constants.SAMPLE_RATE,
-                        Constants.CHANNEL_OUT_CONFIG, Constants.AUDIO_FORMAT);
+            // Get minimum buffer size returned for the format
+            minTrackBuffSizeInBytes = AudioTrack.getMinBufferSize(Constants.SAMPLE_RATE,
+                    Constants.CHANNEL_OUT_CONFIG, Constants.AUDIO_FORMAT);
 
-                // Allocate the byte array to write the audio data to the track
-                trackByteArray = new byte[minTrackBuffSizeInBytes];
+            // Allocate the byte array to write the audio data to the track
+            trackByteArray = new byte[minTrackBuffSizeInBytes];
+
+            if (Constants.AUDIO_TO_SPEAKER) {
 
                 // Instantiate the native player
                 audioTrack = new AudioTrack(Constants.AUDIO_STREAM, Constants.SAMPLE_RATE,
                         Constants.CHANNEL_OUT_CONFIG, Constants.AUDIO_FORMAT, 4 * minTrackBuffSizeInBytes,
                         AudioTrack.MODE_STREAM);
+                mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                mAudioManager.setSpeakerphoneOn(true);
             }
 
             if (Constants.AUDIO_TO_FILE) {

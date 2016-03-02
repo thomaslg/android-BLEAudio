@@ -97,10 +97,6 @@ public class DeviceControlActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (mBluetoothLeService != null) {
-            mBluetoothLeService.connect(mDeviceAddress, true);
-            Log.d(TAG, "Connect request on going");
-        }
     }
 
     @Override

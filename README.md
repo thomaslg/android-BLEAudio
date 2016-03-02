@@ -1,9 +1,8 @@
 
-Android BluetoothLeGatt Sample
-===================================
+Android BluetoothBLEAudio 
+=========================
 
-This sample demonstrates how to use the Bluetooth LE Generic Attribute Profile (GATT)
-to transmit arbitrary data between devices.
+This application is used to test the BLE Audio transmission between devices.
 
 Introduction
 ------------
